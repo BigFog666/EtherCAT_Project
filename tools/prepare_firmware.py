@@ -42,6 +42,66 @@ def save(path, content):
     path.write_bytes(content)
 
 
+def protect_esc_spi_access(hw):
+    # 原端口的直接开关中断不保存调用者状态，Isr版本则没有SPI互斥。
+    # 去掉旧开关；四个访问入口都保护完整的CSR/PRAM操作，支持主循环调用Isr版本。
+    hw, removed = re.subn(r'(?m)^[ \t]*(?:DISABLE|ENABLE)_AL_EVENT_INT;[ \t]*\n', '', hw)
+    if removed != 6:
+        raise ValueError('SPI旧中断开关定位失败：' + str(removed))
+
+    def guarded(match):
+        return '''{
+            /* 保存PRIMASK，避免定时中断重新启用EXTI后打断SPI事务。 */
+            UINT32 project_spi_irq_key = __get_PRIMASK();
+            __disable_irq();
+            __DMB();
+            ''' + match[0] + '''
+            __DMB();
+            __set_PRIMASK(project_spi_irq_key);
+        }'''
+
+    hw, protected = re.subn(r'\b(?:SPIReadDRegister|SPIWriteRegister)\([^;\n]+\);', guarded, hw)
+    if protected != 4:
+        raise ValueError('SPI四个读写入口定位失败：' + str(protected))
+    return hw
+
+
+def extend_txpdo_error_code(header):
+    # 只扩展0x1A00；容量、描述、默认值、最大子索引及映射权限同时匹配。
+    pattern = r'typedef struct OBJ_STRUCT_PACKED_START\s*\{(?:(?!\btypedef\b).)*?TOBJ1A00;'
+    match = re.search(pattern, header, re.DOTALL)
+    if not match or match[0].count('aEntries[5]') != 1:
+        raise ValueError('0x1A00结构容量定位失败')
+    header = header[:match.start()] + match[0].replace('aEntries[5]', 'aEntries[6]') + header[match.end():]
+    descriptors = '{\n   {DEFTYPE_UNSIGNED8, 0x8, ACCESS_READ}, /* 子索引0：条目数量 */\n'
+    descriptors += ',\n'.join('   {DEFTYPE_UNSIGNED32, 0x20, ACCESS_READ} /* 子索引%d */' % i for i in range(1, 7))
+    descriptors += '\n};'
+    header, count = re.subn(r'(asEntryDesc0x1A00\[\]\s*=\s*)\{.*?\};',
+                            lambda m: m[1] + descriptors, header, flags=re.DOTALL)
+    if count != 1:
+        raise ValueError('0x1A00条目描述定位失败')
+    old = '{5, {0x60410010,0x60640020,0x606C0020,0x60610008,0x00000008}}'
+    if header.count(old) != 1:
+        raise ValueError('0x1A00默认映射定位失败')
+    header = header.replace(old, '{6, {0x60410010,0x60640020,0x606C0020,0x60610008,0x00000008,0x603F0010}}')
+    header, count = re.subn(r'(0x1A00,\s*\{DEFTYPE_PDOMAPPING,\s*)5(\s*\|)', r'\g<1>6\2', header)
+    if count != 1:
+        raise ValueError('0x1A00最大子索引定位失败')
+    header, count = re.subn(r'(sEntryDesc0x603F\s*=\s*\{DEFTYPE_UNSIGNED16,\s*0x10,\s*)ACCESS_READ',
+                            r'\g<1>(ACCESS_READ | OBJACCESS_TXPDOMAPPING)', header)
+    if count != 1:
+        raise ValueError('0x603F映射权限定位失败')
+    pattern = r'typedef struct STRUCT_PACKED_START\s*\{(?:(?!\btypedef\b).)*?TCiA402PDO1A00;'
+    match = re.search(pattern, header, re.DOTALL)
+    if not match:
+        raise ValueError('0x1A00过程数据结构定位失败')
+    block = match[0].replace('}STRUCT_PACKED_END', '    UINT16 ObjErrorCode; /* 错误码0x603F，位于反馈末尾 */\n}STRUCT_PACKED_END')
+    if block == match[0]:
+        raise ValueError('0x1A00过程数据结构末尾定位失败')
+    header = header[:match.start()] + block + header[match.end():]
+    return header
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--archive', type=Path, default=DEFAULT_ARCHIVE)
@@ -97,7 +157,8 @@ def main():
         header = header.replace('= {1,{0x1A02,0x0}}', '= {1,{0x1A00,0x0}}')
         if '= {1,{0x1600,0x0}}' not in header or '= {1,{0x1A00,0x0}}' not in header:
             raise ValueError('默认 PDO 分配定位失败')
-        app = '#include "ssc_bridge.h"\n' + app
+        header = extend_txpdo_error_code(header)
+        app = '#include "ssc_bridge.h"\n#include "pdo.h"\n' + app
         app = replace_body(app, 'CiA402_StateMachine', '    /* 项目状态只在主循环的 Project_Poll 更新。 */')
         app = replace_body(app, 'CiA402_Application', '    (void)pCiA402Axis; /* ISR 不运行模型。 */')
         app = replace_body(app, 'CiA402_TransitionAction',
@@ -117,8 +178,11 @@ def main():
         LocalAxes[0].bAxisIsActive = TRUE;
         LocalAxes[0].Objects.objSupportedDriveModes = 0x180;
     }
-    *pInputSize = 12;
-    *pOutputSize = 12;
+    if (LocalAxes[0].Objects.sRxPDOMap0.u16SubIndex0 != 5 ||
+        LocalAxes[0].Objects.sTxPDOMap0.u16SubIndex0 != 6)
+        return ALSTATUSCODE_NOVALIDINPUTS;
+    *pInputSize = PROJECT_TXPDO_BYTES;
+    *pOutputSize = PROJECT_RXPDO_BYTES;
     return ALSTATUSCODE_NOERROR;''')
         app = app.replace('    MainInit();', '    Project_Init();\n    MainInit();')
         app = app.replace('        MainLoop();', '        MainLoop();\n        Project_Poll();')
@@ -138,6 +202,7 @@ def main():
         hw = hw.replace('UINT16 intMask;', 'UINT32 intMask;')
         hw = 'extern void EXTI0_Configuration(void);\nvolatile unsigned int project_byte_test, project_hw_cfg;\n' + hw
         hw = hw.replace('SPI1_GPIO_Init();', 'SPI1_GPIO_Init();\n    project_byte_test = SPIReadDWord(0x64);\n    project_hw_cfg = SPIReadDWord(0x74);')
+        hw = protect_esc_spi_access(hw)
         save(generated / 'el9800hw.c', hw.encode('utf-8'))
         for source_name in ['coeappl.c', 'ecatappl.c', 'ecatslv.c']:
             source = text_decode((board / 'Ethercat/src' / source_name).read_bytes())

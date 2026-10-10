@@ -2,15 +2,17 @@
 
 基于元杞科技 EtherCAT 从站开发板 V3，使用 **STM32F407ZET6 + LAN9252、CMake/GNU Arm、ST-LINK/OpenOCD/GDB 和 Windows SOEM 主站**，完成真实 EtherCAT 通信与 CiA402 单轴模拟关节演示。
 
-主站下发位置或速度目标，板端更新关节模型并返回状态、位置和速度；五个板载 LED 显示通信、使能、运动方向与故障。位置使用教学计数，当前没有接入真实电机。
+主站下发位置或速度目标，板端更新关节模型并返回状态、位置、速度和错误码；五个板载 LED 显示通信、使能、运动方向与故障。位置使用教学计数，当前没有接入真实电机。
 
-**已有实测：**发现 1 个从站、SDO 与映射检查通过、进入 OP、双向 PDO 各 12 字节；三轮快速演示累计 627 次有效 PDO 交换，WKC 均为 3。请求周期为 10ms，属于短测。出厂 Flash/SII 已备份，EEPROM 未改写。
+**当前版本：**命令 RxPDO 12 字节、反馈 TxPDO 14 字节，新增 `0x603F` 错误码。2026-10-09 的两轮板端日志各有 3102 个有效样本，WKC 均为 3；第二轮终端结果为 PASS。故障探针及 GDB/SDO 观察对应 `FF04` 锁存。请求周期为 10ms，属于短测；出厂 EEPROM 保持不变。详见 [更新验证摘要](evidence/2026-10-10_工程更新验证.md)。
 
 ## 已实现内容
 
 - 基于商家 SSC 5.11 与 SPI PDI 驱动集成 LAN9252 从站，保留出厂 EEPROM 配置。
 - 使用 SOEM 发现从站，读取 CoE/SDO 身份及 PDO 映射，核对配置后进入 OP。
-- 显式小端编解码 12 字节命令与反馈，板端通过命令快照接入应用模型。
+- 显式小端编解码 12 字节命令与 14 字节反馈，板端通过完整快照接入应用模型。
+- SSC 对象字典、ESI、生成 SII 和主站长度检查同步更新，反馈尾部携带错误码。
+- 为 LAN9252 的 CSR/PRAM 多步 SPI 事务增加中断保护，保存并恢复原 PRIMASK。
 - CiA402 教学子集：使能、CSP 位置模式、CSV 速度模式、快速停止、故障锁存及显式复位。
 - 主站按反馈推进演示阶段，记录 WKC、位置/速度及 PC 侧调用时间。
 - 板端应用超时处理与 LED 状态显示，电脑端行为测试及主站序列模拟测试。
@@ -32,7 +34,7 @@ LAN9252 处理 EtherCAT 帧与过程数据区；STM32 通过 SPI 读写 ESC，�
 
 ```text
 EtherCAT_Project
-├─ common/                    关节模型、12 字节 PDO 编解码、身份定义
+├─ common/                    关节模型、12/14 字节 PDO 编解码、身份定义
 ├─ firmware/                  SSC 桥接、GNU 启动、链接与内存适配
 │  └─ generated/              商家源码适配后的本地生成目录，不提交
 ├─ master/                    SOEM 主站、反馈驱动的演示、离线示例
@@ -49,7 +51,7 @@ EtherCAT_Project
 
 ## PDO 布局
 
-每个方向固定 12 字节，采用小端格式。命名按主站的输入/输出方向。
+命令固定 12 字节，反馈固定 14 字节，采用小端格式。Rx/Tx 按从站收发方向命名；主站 outputs 对应 RxPDO，inputs 对应 TxPDO。
 
 | 字节偏移 | 长度 | RxPDO：主站→从站 | TxPDO：从站→主站 |
 |---|---:|---|---|
@@ -58,6 +60,9 @@ EtherCAT_Project
 | 6～9 | 4 | 目标速度 0x60FF | 实际速度 0x606C |
 | 10 | 1 | 请求模式 0x6060 | 显示模式 0x6061 |
 | 11 | 1 | 填充 0 | 填充 0 |
+| 12～13 | 2 | 无此字段 | 错误码 0x603F |
+
+`0x1600` 有 5 个映射条目、96 bit；`0x1A00` 有 6 个映射条目、112 bit。C 结构体可能有对齐填充，线上长度以显式编解码为准。旧 12 字节反馈程序与本版不兼容，更新时应同时重建主站和固件。
 
 支持模式 8（CSP）与 9（CSV）。例如控制字 0x000F、目标位置 1000、目标速度 0、模式 8：
 
@@ -98,7 +103,7 @@ build/host/joint_master.exe           真实主站
 build/host/offline_demo.exe           电脑离线演示
 ```
 
-`build.ps1` 自动运行两项 CTest 与配置交叉检查，只做本地准备和构建，不访问开发板或写 EEPROM。当前脚本的 All/Firmware/Host 路径均会执行固件来源准备，因此需要商家 ZIP。
+`build.ps1` 在 All/Host 构建中自动运行三项 CTest（含 88 项正式反馈检查），并执行配置交叉检查。构建只做本地准备，不访问开发板或写 EEPROM。All/Firmware/Host 路径均会执行固件来源准备，因此需要商家 ZIP。
 
 ## 下载、调试与通信
 
@@ -106,7 +111,11 @@ build/host/offline_demo.exe           电脑离线演示
 
 ```powershell
 .\tools\flash.ps1
+# 第一个终端启动 OpenOCD，第二个终端启动 GDB。
+.\tools\debug-server.ps1
 .\tools\debug.ps1
+# 保留当前 RAM 故障现场，连接后暂停，不复位、不下载：
+.\tools\debug.ps1 -Attach
 ```
 
 GDB 会暂停目标；运行真实通信前应让 MCU 恢复运行。烧录由 OpenOCD 校验后复位启动。EEPROM 示例另有明确操作步骤，首次演示保留出厂 SII 即可。
@@ -115,18 +124,18 @@ GDB 会暂停目标；运行真实通信前应让 MCU 恢复运行。烧录由 O
 
 ```powershell
 .\tools\master.ps1 -Action List
-$nic = '填写 List 输出的有线网卡接口名称'
+$nic = '以太网' # 使用本机 Get-NetAdapter 显示的准确名称，或 List 的完整接口名。
 .\tools\master.ps1 -Action Inspect -Interface $nic
-.\tools\master.ps1 -Action Demo -Interface $nic -ResetBeforeDemo -PeriodUs 10000 -Csv 'evidence/logs/run_next.csv'
-.\tools\master.ps1 -Action LedDemo -Interface $nic -ResetBeforeDemo
+$stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+.\tools\master.ps1 -Action Demo -Interface $nic -ResetBeforeDemo -PeriodUs 10000 -Csv "evidence/logs/${stamp}_demo.csv"
+.\tools\master.ps1 -Action LedDemo -Interface $nic -ResetBeforeDemo -Csv "evidence/logs/${stamp}_led.csv"
+.\tools\analyze.ps1 "evidence/logs/${stamp}_led.csv"
 ```
 
-快速演示的关键输出：
+当前程序应先核对映射和长度，再进入 OP。快速演示周期数随反馈时序变化；最新慢速第二轮实际完成输出为：
 
 ```text
-SDO identity, CSP/CSV capabilities and all PDO entries match.
-OP reached; expected WKC=3, requested period=10000 us
-demo result=PASS cycles=209 phase=11 checks=0x3f
+demo result=PASS cycles=3102 phase=11 checks=0x3f
 ```
 
 主站退出后会停止 PDO，板端应用通信超时 FF04 可锁存。`ResetBeforeDemo` 在同一 OP 会话显式复位已有故障后继续演示；默认连接恢复不等于自动复位和使能。慢速 LedDemo 的周期数与快速演示不同，以阶段完成和实际日志为准。
@@ -151,9 +160,10 @@ demo result=PASS cycles=209 phase=11 checks=0x3f
 | SPI PDI、SDO、OP、12/12 字节 PDO | 通过，1 从站，WKC=3 | 同上 |
 | CSP/CSV、停止、故障及复位 | 三轮 PASS，共 627 个有效样本 | [统计摘要](evidence/measurements/20261005_通信摘要.csv) |
 | 五灯慢速演示 | 两轮 PASS，3202/3102 周期，用户确认现象 | [LED 演示摘要](docs/验收范围.md#板载-led-演示) |
-| 固件/主站本地构建与桌面测试 | 独立目录全新构建通过，CTest 2/2 | [发布验证](evidence/2026-10-06_独立仓库发布验证.md) |
+| 当前 12/14 字节反馈与错误码 | 两轮各 3102 个有效样本、WKC=3，Run2 终端 PASS；FF04 的 GDB/SDO/PDO 对照 | [更新验证](evidence/2026-10-10_工程更新验证.md) |
+| 当前公开工程固件/主站构建与桌面测试 | 构建通过，CTest 3/3、正式反馈检查 88 项 | 同上 |
 
-上述硬件结果来自 2026-10-05 的实测。10ms 是 Windows 主站请求周期，PC 发包间隔与往返统计不代表硬实时、单程网络时延或 DC 精度。物理拔线恢复、长时间运行、1ms、DC、多轴、TwinCAT 导入、完整 CiA402/ETG 一致性与真实电机闭环仍未验收。
+首次联调与五灯现象来自 2026-10-05 的旧 12/12 字节版本；当前 12/14 字节日志来自 2026-10-09，不能混用两版证据。10ms 是 Windows 主站请求周期，PC 发包间隔与往返统计不代表硬实时、单程网络时延或 DC 精度。物理拔线恢复、长时间运行、1ms、DC、多轴、TwinCAT 导入、完整 CiA402/ETG 一致性与真实电机闭环仍未验收。
 
 ## 工程文档
 

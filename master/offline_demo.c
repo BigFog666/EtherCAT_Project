@@ -4,7 +4,7 @@
 int main(void)
 {
     Joint slave; JointCommand master={0,1000,0,8}, received;
-    JointFeedback feedback; uint8_t rx[12],tx[12]; unsigned i;
+    JointFeedback feedback; uint8_t rx[PROJECT_RXPDO_BYTES],tx[PROJECT_TXPDO_BYTES]; unsigned i;
     joint_init(&slave,0);
     puts("OFFLINE MODEL ONLY: no EtherCAT frame, NIC or board is used.");
     puts("cycle,cw,sw,target,actual,velocity,error");
@@ -25,15 +25,15 @@ int main(void)
         if(i==311) master.controlword=7;
         if(i==312) master.controlword=15;
         project_encode_command(rx,&master);
-        if(!project_decode_command(rx,12,&received)) return 1;
+        if(!project_decode_command(rx,sizeof(rx),&received)) return 1;
         joint_receive(&slave,&received,(i+1)*1000);
         joint_update(&slave,(i+1)*1000,1);
         project_encode_feedback(tx,&slave.feedback);
-        if(!project_decode_feedback(tx,12,&feedback)) return 1;
+        if(!project_decode_feedback(tx,sizeof(tx),&feedback)) return 1;
         if(i%20==0 || (i>=300 && i<=303))
             printf("%u,0x%04x,0x%04x,%ld,%ld,%ld,0x%04x\n",i,master.controlword,
                    feedback.statusword,(long)master.target_position,(long)feedback.position,
-                   (long)feedback.velocity,slave.error_code);
+                   (long)feedback.velocity,feedback.error_code);
     }
     return 0;
 }

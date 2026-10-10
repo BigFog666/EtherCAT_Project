@@ -34,7 +34,7 @@ static void update_leds(uint32_t now)
     if ((uint32_t)(now - led_updated_at) < 10000u) return;
     led_updated_at = now;
     /* LED1：空闲慢闪，周期通信有效时常亮。LED2：关节实际使能。 */
-    if (op || (now / 500000u) % 2u == 0) lit |= GPIO_Pin_11;
+    if (op || (now / 250000u) % 2u == 0) lit |= GPIO_Pin_11;
     if (model.state == JD_ENABLED) lit |= GPIO_Pin_12;
     /* LED3/4：用实际速度的正负显示方向，运动期间每秒闪两次。 */
     if ((now / 250000u) % 2u == 0) {
@@ -86,11 +86,11 @@ void Project_OutputMapping(unsigned short *data)
 {
     JointCommand command;
     uint32_t key;
-    if (!project_decode_command((const uint8_t *)data, PROJECT_PDO_BYTES, &command)) return;
+    if (!project_decode_command((const uint8_t *)data, PROJECT_RXPDO_BYTES, &command)) return;
     key = lock_irq();
-    pending_command = command;
-    received_at = TIM5->CNT;
-    received_generation++;
+    pending_command = command;      //保存最新命令
+    received_at = TIM5->CNT;        //保存命令到达时间
+    received_generation++;          //增加命令版本号，供主循环 Project_Poll() 检测新命令
     unlock_irq(key);
 }
 
@@ -114,10 +114,10 @@ void Project_Poll(void)
     generation = received_generation;
     unlock_irq(key);
     if (generation != processed_generation) {
-        joint_receive(&model, &snapshot, timestamp);
+        joint_receive(&model, &snapshot, timestamp);        //发现新命令后，把命令和接收时间保存进模型
         processed_generation = generation;
     }
-    joint_update(&model, TIM5->CNT, bEcatOutputUpdateRunning != 0);
+    joint_update(&model, TIM5->CNT, bEcatOutputUpdateRunning != 0);   //根据当前命令、时间、通信许可和驱动状态，更新模型
     /* 更新原 SSC 字典变量，SDO Upload 与 PDO 反馈可观察同一份数据。 */
     key = lock_irq();
     published_feedback = model.feedback;

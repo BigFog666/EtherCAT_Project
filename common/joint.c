@@ -32,7 +32,7 @@ static int command_cause(const Joint *j)
 
 void joint_update(Joint *j, uint32_t now, int op)
 {
-    uint32_t dt = now - j->last_update_us;
+    uint32_t dt = now - j->last_update_us;      // 计算自上次更新以来的时间间隔，单位微秒
     uint16_t cw = j->command.controlword;
     int reset = (cw & 0x0080u) != 0;
     int rising = reset && !j->previous_reset;
@@ -76,7 +76,7 @@ void joint_update(Joint *j, uint32_t now, int op)
         else if (j->state == JD_SWITCHED) j->state = JD_ENABLED;
     }
 
-    if (j->state == JD_ENABLED && op && !stale && !cause) {
+    if (j->state == JD_ENABLED && op && !stale && !cause) {   //判断是否满足运动条件
         /* 不把一次异常长停顿补算成运动，避免模型跳变。 */
         if (dt > JOINT_TIMEOUT_US) dt = 0;
         if (j->command.mode == 8) {
@@ -101,6 +101,7 @@ void joint_update(Joint *j, uint32_t now, int op)
         }
         j->position_micro = next;
     }
+    //更新实际位置、速度和状态字
     j->feedback.position = (int32_t)(j->position_micro / 1000000);
     j->feedback.velocity = velocity;
     j->feedback.mode = (j->command.mode == 8 || j->command.mode == 9) ? j->command.mode : 0;
@@ -116,4 +117,5 @@ void joint_update(Joint *j, uint32_t now, int op)
     if (j->state == JD_ENABLED && j->command.mode == 8 &&
         j->feedback.position == j->command.target_position)
         j->feedback.statusword |= 0x0400; /* 教学目标到达标志 */
+    j->feedback.error_code = j->error_code;
 }

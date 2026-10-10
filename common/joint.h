@@ -18,6 +18,7 @@ typedef struct {
     int32_t position;
     int32_t velocity;
     int8_t mode;
+    uint16_t error_code;
 } JointFeedback;
 typedef struct {
     JointCommand command;

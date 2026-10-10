@@ -4,16 +4,16 @@
 static int run_sequence(int visual)
 {
     DemoSequence demo={0,0,0}; Joint slave; JointCommand c={0,0,0,8}, received;
-    JointFeedback f; uint8_t output[12],input[12]; unsigned i; int result=1;
+    JointFeedback f; uint8_t output[PROJECT_RXPDO_BYTES],input[PROJECT_TXPDO_BYTES]; unsigned i; int result=1;
     joint_init(&slave,0); f=slave.feedback;
     for(i=0;i<6000 && result>0;i++) {
         result=visual ? demo_next_visual(&demo,&f,&c) : demo_next(&demo,&f,&c);
         project_encode_command(output,&c);
-        if(!project_decode_command(output,12,&received)) return 1;
+        if(!project_decode_command(output,sizeof(output),&received)) return 1;
         joint_receive(&slave,&received,(i+1)*10000);
         joint_update(&slave,(i+1)*10000,1);
         project_encode_feedback(input,&slave.feedback);
-        if(!project_decode_feedback(input,12,&f)) return 1;
+        if(!project_decode_feedback(input,sizeof(input),&f) || f.error_code!=slave.error_code) return 1;
     }
     if(result!=0 || demo.reached!=63 || slave.state!=JD_DISABLED) {
         fprintf(stderr,"sequence failed: phase=%u result=%d flags=%u\n",demo.phase,result,demo.reached); return 1;

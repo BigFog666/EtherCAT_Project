@@ -19,7 +19,7 @@ static void write32(uint8_t *p, int32_t v)
 }
 int project_decode_command(const uint8_t *p, size_t n, JointCommand *c)
 {
-    if (!p || !c || n != PROJECT_PDO_BYTES) return 0;
+    if (!p || !c || n != PROJECT_RXPDO_BYTES) return 0;
     c->controlword = read16(p); c->target_position = read32(p+2);
     c->target_velocity = read32(p+6);
     c->mode = p[10] <= 127 ? (int8_t)p[10] : (int8_t)(-1-(255-p[10]));
@@ -27,9 +27,10 @@ int project_decode_command(const uint8_t *p, size_t n, JointCommand *c)
 }
 int project_decode_feedback(const uint8_t *p, size_t n, JointFeedback *f)
 {
-    if (!p || !f || n != PROJECT_PDO_BYTES) return 0;
+    if (!p || !f || n != PROJECT_TXPDO_BYTES) return 0;
     f->statusword = read16(p); f->position = read32(p+2); f->velocity = read32(p+6);
     f->mode = p[10] <= 127 ? (int8_t)p[10] : (int8_t)(-1-(255-p[10]));
+    f->error_code = read16(p+12);
     return 1;
 }
 void project_encode_command(uint8_t *p, const JointCommand *c)
@@ -41,4 +42,5 @@ void project_encode_feedback(uint8_t *p, const JointFeedback *f)
 {
     write16(p,f->statusword); write32(p+2,f->position);
     write32(p+6,f->velocity); p[10] = (uint8_t)f->mode; p[11] = 0;
+    write16(p+12,f->error_code);
 }

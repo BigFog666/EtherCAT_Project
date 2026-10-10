@@ -12,7 +12,7 @@ static void enable(Joint *j, JointCommand *c, uint32_t *time)
 int main(void)
 {
     Joint j; JointCommand c={0,1000,0,8}, decoded, saved;
-    JointFeedback f, fd; uint8_t bytes[12]; uint32_t t=0; unsigned i;
+    JointFeedback f, fd; uint8_t bytes[PROJECT_TXPDO_BYTES]; uint32_t t=0; unsigned i;
     joint_init(&j,t);
     CHECK(j.state==JD_DISABLED && j.feedback.statusword==0x40);
     c.controlword=15; tick(&j,&c,&t,1); CHECK(j.state==JD_DISABLED);
@@ -68,9 +68,9 @@ int main(void)
     saved=decoded; CHECK(!project_decode_command(bytes,11,&decoded));
     CHECK(decoded.target_position==saved.target_position);
     CHECK(!project_decode_command(NULL,12,&decoded));
-    f.statusword=0x427; f.position=-123; f.velocity=-456; f.mode=9;
-    project_encode_feedback(bytes,&f); CHECK(project_decode_feedback(bytes,12,&fd));
-    CHECK(fd.statusword==f.statusword && fd.position==-123 && fd.velocity==-456 && fd.mode==9);
+    f.statusword=0x427; f.position=-123; f.velocity=-456; f.mode=9; f.error_code=0xFF04;
+    project_encode_feedback(bytes,&f); CHECK(project_decode_feedback(bytes,PROJECT_TXPDO_BYTES,&fd));
+    CHECK(fd.statusword==f.statusword && fd.position==-123 && fd.velocity==-456 && fd.mode==9 && fd.error_code==f.error_code);
     printf("PASS: %u behavior checks (model/PDO only; no hardware)\n",checks);
     return 0;
 }
